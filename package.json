@@ -1,16 +1,18 @@
 {
   "name": "pc-smart-ops-local-agent",
   "version": "1.0.0",
-  "description": "Agente local para capturar hardware do PC e expor recomendacoes via API REST.",
+  "description": "Agente local para analise de hardware, perfis e snapshots de setup.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
+    "init-db": "node initDb.js",
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
   "keywords": [
     "hardware",
     "local-agent",
+    "setup-optimizer",
     "systeminformation",
     "express"
   ],
@@ -19,6 +21,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "sqlite3": "^6.0.1",
     "systeminformation": "^5.22.12"
   }
 }

@@ -1,9 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const si = require('systeminformation');
+const sqlite3 = require('sqlite3').verbose();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const db = new sqlite3.Database('./setup_optimizer.db');
 
 app.use(cors({
   origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173'],
@@ -11,45 +13,11 @@ app.use(cors({
 app.use(express.json());
 
 const bytesToGb = (bytes) => Number((bytes / 1024 / 1024 / 1024).toFixed(2));
+const roundGb = (bytes) => Math.round(bytes / 1024 / 1024 / 1024);
 
-const profiles = [
-  {
-    id: 'mmo-gaming',
-    name: 'MMO Gaming',
-    description: 'Foco em estabilidade de FPS, bom desempenho em raids e cargas com muitos jogadores.',
-    idealHardware: {
-      cpu: 'Ryzen 7 5700X3D ou superior com alto cache L3',
-      ram: '32 GB DDR4/DDR5',
-      gpu: 'RTX 3060 Ti / RTX 4060 Ti ou superior',
-      storage: 'SSD NVMe para sistema e jogos',
-    },
-    priority: ['CPU cache', 'RAM suficiente', 'SSD rapido', 'GPU intermediaria ou superior'],
-  },
-  {
-    id: 'web-design',
-    name: 'Web Design',
-    description: 'Foco em multitarefa, ferramentas criativas, browser pesado e produtividade visual.',
-    idealHardware: {
-      cpu: 'Ryzen 5 / Core i5 moderno ou superior',
-      ram: '32 GB recomendados para Adobe, Figma e multitarefa',
-      gpu: 'GPU dedicada intermediária ou iGPU moderna',
-      storage: 'SSD NVMe com bom espaco livre',
-    },
-    priority: ['RAM', 'SSD', 'CPU equilibrada', 'Monitor e calibracao de cor'],
-  },
-  {
-    id: 'heavy-rendering',
-    name: 'Heavy Rendering',
-    description: 'Foco em renderizacao 3D, video 4K, VRAM e cargas longas de CPU/GPU.',
-    idealHardware: {
-      cpu: 'Ryzen 9 / Core i9 ou workstation equivalente',
-      ram: '64 GB ou mais',
-      gpu: 'RTX 4070 Ti Super / RTX 4080 ou superior com 16 GB+ de VRAM',
-      storage: 'SSD NVMe de alta velocidade e disco secundario para projetos',
-    },
-    priority: ['VRAM', 'CUDA/RT cores', 'CPU multicore', 'RAM alta', 'armazenamento rapido'],
-  },
-];
+function getMainGpu(graphics) {
+  return graphics.controllers.find((gpu) => gpu.vram > 0) || graphics.controllers[0] || null;
+}
 
 async function getHardwareInfo() {
   const [cpu, memory, graphics, disks] = await Promise.all([
@@ -59,9 +27,12 @@ async function getHardwareInfo() {
     si.diskLayout(),
   ]);
 
+  const mainGpu = getMainGpu(graphics);
+
   return {
     cpu: {
       brand: cpu.manufacturer,
+      vendor: cpu.vendor,
       model: cpu.brand,
       cores: {
         physical: cpu.physicalCores,
@@ -77,11 +48,24 @@ async function getHardwareInfo() {
       totalGb: bytesToGb(memory.total),
       usedGb: bytesToGb(memory.used),
       freeGb: bytesToGb(memory.free),
+      total: roundGb(memory.total),
+      free: roundGb(memory.free),
+    },
+    mainGpu: mainGpu ? {
+      model: mainGpu.model,
+      vendor: mainGpu.vendor,
+      vramMb: mainGpu.vram || 0,
+      vramGb: mainGpu.vram ? Math.round(mainGpu.vram / 1024) : 0,
+    } : {
+      model: 'Nao detectada',
+      vendor: 'Desconhecido',
+      vramMb: 0,
+      vramGb: 0,
     },
     gpu: graphics.controllers.map((gpu) => ({
       model: gpu.model,
       vendor: gpu.vendor,
-      vramMb: gpu.vram,
+      vramMb: gpu.vram || 0,
       vramGb: gpu.vram ? Number((gpu.vram / 1024).toFixed(2)) : null,
     })),
     storage: disks.map((disk) => ({
@@ -111,9 +95,58 @@ app.get('/api/hardware', async (_req, res) => {
 });
 
 app.get('/api/profiles', (_req, res) => {
-  res.json(profiles);
+  db.all('SELECT * FROM profiles ORDER BY id ASC', [], (error, rows) => {
+    if (error) {
+      res.status(500).json({ error: 'profiles_read_failed', message: error.message });
+      return;
+    }
+
+    res.json(rows);
+  });
+});
+
+app.get('/api/snapshots', (_req, res) => {
+  db.all('SELECT * FROM snapshots ORDER BY timestamp DESC LIMIT 50', [], (error, rows) => {
+    if (error) {
+      res.status(500).json({ error: 'snapshots_read_failed', message: error.message });
+      return;
+    }
+
+    res.json(rows);
+  });
+});
+
+app.post('/api/snapshots', (req, res) => {
+  const { cpu_model, ram_total, gpu_model, gpu_vram } = req.body;
+
+  if (!cpu_model || !ram_total || !gpu_model || gpu_vram === undefined) {
+    res.status(400).json({
+      error: 'invalid_snapshot_payload',
+      message: 'Informe cpu_model, ram_total, gpu_model e gpu_vram.',
+    });
+    return;
+  }
+
+  const stmt = db.prepare(`INSERT INTO snapshots
+    (timestamp, cpu_model, ram_total, gpu_model, gpu_vram)
+    VALUES (?, ?, ?, ?, ?)`);
+
+  stmt.run(new Date().toISOString(), cpu_model, ram_total, gpu_model, gpu_vram, function onInsert(error) {
+    if (error) {
+      res.status(500).json({ error: 'snapshot_write_failed', message: error.message });
+      return;
+    }
+
+    res.status(201).json({ id: this.lastID, message: 'Snapshot gravado com sucesso.' });
+  });
+
+  stmt.finalize();
 });
 
 app.listen(PORT, () => {
   console.log(`PC Smart Ops local agent running at http://localhost:${PORT}`);
+});
+
+process.on('SIGINT', () => {
+  db.close(() => process.exit(0));
 });
